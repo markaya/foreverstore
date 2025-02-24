@@ -93,6 +93,7 @@ func (t *TCPTransport) startAcceptLoop() {
 	for {
 		conn, err := t.listener.Accept()
 		if errors.Is(err, net.ErrClosed) {
+			fmt.Printf("TCP Err Closed\n")
 			return
 		}
 		if err != nil {
@@ -111,7 +112,6 @@ func (t *TCPTransport) handleConn(conn net.Conn, outbound bool) {
 
 	peer := NewTCPPeer(conn, outbound)
 
-	//TODO: Make snippet for this error statements `if err := ...; err != nil{}`
 	if err := t.HandshakeFunc(peer); err != nil {
 		return
 	}
@@ -128,6 +128,7 @@ func (t *TCPTransport) handleConn(conn net.Conn, outbound bool) {
 		if err := t.Decoder.Decode(conn, &rpc); err != nil {
 			var oe *net.OpError
 			if errors.As(err, &oe) {
+				fmt.Printf("Error decoding data")
 				return
 			}
 
