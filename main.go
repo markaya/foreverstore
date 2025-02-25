@@ -42,17 +42,19 @@ func main() {
 		log.Fatal(s1.Start())
 	}()
 
-	time.Sleep(1 * time.Second)
+	time.Sleep(2 * time.Second)
 
 	go s2.Start()
-	time.Sleep(1 * time.Second)
+	time.Sleep(2 * time.Second)
 
-	// data := bytes.NewReader([]byte("my big data file here"))
-	// err := s2.Store("myprivatedata", data)
+	// data := bytes.NewReader([]byte("my big data file here!"))
+	// s2.Store(fmt.Sprintf("coolPicture.jpeg"), data)
+	// time.Sleep(5 * time.Millisecond)
 	// if err != nil {
 	// 	panic(err)
 	// }
-	r, err := s2.Get("myprivatedata")
+
+	r, err := s2.Get("coolPicture.jpeg")
 	if err != nil {
 		log.Fatal(err)
 	}
@@ -63,7 +65,5 @@ func main() {
 	}
 
 	fmt.Println(string(b))
-
-	select {}
 
 }

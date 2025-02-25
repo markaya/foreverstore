@@ -2,6 +2,7 @@ package main
 
 import (
 	"bytes"
+	"encoding/binary"
 	"encoding/gob"
 	"fmt"
 	"io"
@@ -72,6 +73,8 @@ func (s *FileServer) broadcast(msg *Message) error {
 	}
 
 	for _, peer := range s.peers {
+		peer.Send([]byte{p2p.IncomingMessage})
+		time.Sleep(time.Millisecond * 10)
 		if err := peer.Send(buf.Bytes()); err != nil {
 			return err
 		}
@@ -81,10 +84,19 @@ func (s *FileServer) broadcast(msg *Message) error {
 
 func (s *FileServer) Get(key string) (io.Reader, error) {
 	if s.store.Has(key) {
+		fmt.Printf(
+			"[%s] serving file (%s) from local disk\n",
+			s.Transport.Addr(),
+			key,
+		)
 		return s.store.Read(key)
 	}
 
-	fmt.Printf("Don't have file (%s) locally, fetching from network... \n", key)
+	fmt.Printf(
+		"[%s] don't have file (%s) locally, fetching from network... \n",
+		s.Transport.Addr(),
+		key,
+	)
 
 	msg := Message{
 		Payload: MessageGetFile{
@@ -96,21 +108,29 @@ func (s *FileServer) Get(key string) (io.Reader, error) {
 		return nil, err
 	}
 
+	time.Sleep(time.Millisecond * 500)
+
 	for _, peer := range s.peers {
-		fmt.Println("receiving stream from peer:", peer.RemoteAddr())
-		fileBuffer := new(bytes.Buffer)
-		n, err := io.CopyN(fileBuffer, peer, 10)
+		n, err := s.store.Write(key, io.LimitReader(peer, 22))
 		if err != nil {
-			//FIXME: this could return on invalid peer
 			return nil, err
 		}
-		fmt.Println("receifved bytes over the network: ", n)
-		fmt.Println(fileBuffer.String())
+		// fileBuffer := new(bytes.Buffer)
+		// n, err := io.CopyN(fileBuffer, peer, 22)
+		// if err != nil {
+		// 	//FIXME: this could return on invalid peer
+		// 	return nil, err
+		// }
+
+		fmt.Printf("[%s] received (%d) bytes over the network from (%s): \n",
+			s.Transport.Addr(),
+			n,
+			peer.RemoteAddr(),
+		)
+		peer.CloseStream()
 	}
 
-	select {}
-
-	return nil, nil
+	return s.store.Read(key)
 }
 
 func (s *FileServer) Store(key string, r io.Reader) error {
@@ -136,10 +156,11 @@ func (s *FileServer) Store(key string, r io.Reader) error {
 	}
 
 	//FIXME: Why this??
-	time.Sleep(time.Second * 3)
+	time.Sleep(time.Millisecond * 5)
 
 	//TODO: Use multiwriter here
 	for _, peer := range s.peers {
+		peer.Send([]byte{p2p.IncomingStream})
 		n, err := io.Copy(peer, fileBuffer)
 		if err != nil {
 			return err
@@ -204,10 +225,18 @@ func (s *FileServer) handleMessage(from string, msg *Message) error {
 
 func (s *FileServer) handleMessageGetFile(from string, msg MessageGetFile) error {
 	if !s.store.Has(msg.Key) {
-		return fmt.Errorf("Need to serve file (%s) but it does not exist on disk", msg.Key)
+		return fmt.Errorf(
+			"[%s] need to serve file (%s) but it does not exist on disk",
+			s.Transport.Addr(),
+			msg.Key,
+		)
 	}
 
-	fmt.Printf("serving file (%s) over the network...\n", msg.Key)
+	fmt.Printf(
+		"[%s] serving file (%s) over the network...\n",
+		s.Transport.Addr(),
+		msg.Key,
+	)
 
 	r, err := s.store.Read(msg.Key)
 	if err != nil {
@@ -216,7 +245,16 @@ func (s *FileServer) handleMessageGetFile(from string, msg MessageGetFile) error
 
 	peer, ok := s.peers[from]
 	if !ok {
-		return fmt.Errorf("peer %s not in map", from)
+		return fmt.Errorf("peer %s not in map\n", from)
+	}
+
+	// Fist send the "incomingstream" byte to peer.
+	// Then we can send file size sa int64.
+	err = peer.Send([]byte{p2p.IncomingStream})
+	var fileSize int64 = 22
+	binary.Write(peer, binary.LittleEndian, fileSize)
+	if err != nil {
+		return err
 	}
 
 	n, err := io.Copy(peer, r)
@@ -224,7 +262,11 @@ func (s *FileServer) handleMessageGetFile(from string, msg MessageGetFile) error
 		return err
 	}
 
-	fmt.Printf("wrote %d bytes over the network to %s\n", n, from)
+	fmt.Printf("[%s] written (%d) bytes over the network to %s\n",
+		s.Transport.Addr(),
+		n,
+		from,
+	)
 
 	return nil
 }
@@ -241,9 +283,9 @@ func (s *FileServer) handleMessageStoreFile(from string, msg MessageStoreFile) e
 		return err
 	}
 
-	fmt.Printf("written %d bytes to disk \n", n)
+	fmt.Printf("[%s] written %d bytes to disk \n", s.Transport.Addr(), n)
 
-	peer.(*p2p.TCPPeer).Wg.Done()
+	peer.CloseStream()
 
 	return nil
 }
