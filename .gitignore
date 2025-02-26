@@ -25,5 +25,5 @@ go.work.sum
 .env
 bin/
 
-:3000/
-:4000/
+:3000_network/
+:4000_network/

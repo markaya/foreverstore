@@ -14,6 +14,7 @@ import (
 )
 
 type FileServerOpts struct {
+	EncKey            []byte
 	StorageRoot       string
 	PathTransformFunc PathTransformFunc
 	Transport         p2p.Transport
@@ -56,15 +57,6 @@ type MessageGetFile struct {
 	Key string
 }
 
-func (s *FileServer) stream(msg *Message) error {
-	peers := []io.Writer{}
-	for _, peer := range s.peers {
-		peers = append(peers, peer)
-	}
-	mw := io.MultiWriter(peers...)
-	return gob.NewEncoder(mw).Encode(msg)
-}
-
 func (s *FileServer) broadcast(msg *Message) error {
 
 	buf := new(bytes.Buffer)
@@ -89,7 +81,8 @@ func (s *FileServer) Get(key string) (io.Reader, error) {
 			s.Transport.Addr(),
 			key,
 		)
-		return s.store.Read(key)
+		_, r, err := s.store.Read(key)
+		return r, err
 	}
 
 	fmt.Printf(
@@ -111,16 +104,18 @@ func (s *FileServer) Get(key string) (io.Reader, error) {
 	time.Sleep(time.Millisecond * 500)
 
 	for _, peer := range s.peers {
-		n, err := s.store.Write(key, io.LimitReader(peer, 22))
+		// First read the file size so we can limit the amount of bytes that we read
+		// from the connection so it will not keep hanging.
+		var fileSize int64
+		err := binary.Read(peer, binary.LittleEndian, &fileSize)
+		if err != nil {
+			panic(err)
+		}
+
+		n, err := s.store.WriteDecrypt(s.EncKey, key, io.LimitReader(peer, fileSize))
 		if err != nil {
 			return nil, err
 		}
-		// fileBuffer := new(bytes.Buffer)
-		// n, err := io.CopyN(fileBuffer, peer, 22)
-		// if err != nil {
-		// 	//FIXME: this could return on invalid peer
-		// 	return nil, err
-		// }
 
 		fmt.Printf("[%s] received (%d) bytes over the network from (%s): \n",
 			s.Transport.Addr(),
@@ -130,10 +125,12 @@ func (s *FileServer) Get(key string) (io.Reader, error) {
 		peer.CloseStream()
 	}
 
-	return s.store.Read(key)
+	_, r, err := s.store.Read(key)
+	return r, err
 }
 
 func (s *FileServer) Store(key string, r io.Reader) error {
+
 	var (
 		fileBuffer = new(bytes.Buffer)
 		tee        = io.TeeReader(r, fileBuffer)
@@ -147,7 +144,7 @@ func (s *FileServer) Store(key string, r io.Reader) error {
 	msg := Message{
 		Payload: MessageStoreFile{
 			Key:  key,
-			Size: size,
+			Size: size + 16,
 		},
 	}
 
@@ -158,16 +155,21 @@ func (s *FileServer) Store(key string, r io.Reader) error {
 	//FIXME: Why this??
 	time.Sleep(time.Millisecond * 5)
 
-	//TODO: Use multiwriter here
-	for _, peer := range s.peers {
-		peer.Send([]byte{p2p.IncomingStream})
-		n, err := io.Copy(peer, fileBuffer)
-		if err != nil {
-			return err
-		}
+	peers := []io.Writer{}
 
-		fmt.Printf("received and broadcast bytes to disk: %d\n", n)
+	for _, peer := range s.peers {
+		peers = append(peers, peer)
 	}
+	mw := io.MultiWriter(peers...)
+	if _, err := mw.Write([]byte{p2p.IncomingStream}); err != nil {
+		return err
+	}
+	n, err := copyEncrypt(s.EncKey, fileBuffer, mw)
+	if err != nil {
+		return err
+	}
+
+	fmt.Printf("[%s] received and wirtten (%d) bytes to disk\n", s.Transport.Addr(), n)
 
 	return nil
 }
@@ -238,9 +240,17 @@ func (s *FileServer) handleMessageGetFile(from string, msg MessageGetFile) error
 		msg.Key,
 	)
 
-	r, err := s.store.Read(msg.Key)
+	fileSize, r, err := s.store.Read(msg.Key)
 	if err != nil {
 		return err
+	}
+
+	//WARNING: How to fix this not to reapeat readercloseer everytime?
+	if rc, ok := r.(io.ReadCloser); ok {
+		fmt.Println("closing ReadCloser")
+		defer rc.Close()
+	} else {
+		panic("Here")
 	}
 
 	peer, ok := s.peers[from]
@@ -251,7 +261,6 @@ func (s *FileServer) handleMessageGetFile(from string, msg MessageGetFile) error
 	// Fist send the "incomingstream" byte to peer.
 	// Then we can send file size sa int64.
 	err = peer.Send([]byte{p2p.IncomingStream})
-	var fileSize int64 = 22
 	binary.Write(peer, binary.LittleEndian, fileSize)
 	if err != nil {
 		return err
@@ -291,12 +300,14 @@ func (s *FileServer) handleMessageStoreFile(from string, msg MessageStoreFile) e
 }
 
 func (s *FileServer) boostrapNetwork() error {
+
+	fmt.Println("Here", s.BootstrapNodes)
 	for _, addr := range s.BootstrapNodes {
 		if len(addr) == 0 {
 			continue
 		}
 		go func(addr string) {
-			log.Println("[info] attempting to connect with remote: ", addr)
+			log.Printf("[%s] attempting to connect with remote: %s\n ", s.Transport.Addr(), addr)
 			if err := s.Transport.Dial(addr); err != nil {
 				log.Println("[error] dial error: ", err)
 			}
@@ -307,6 +318,7 @@ func (s *FileServer) boostrapNetwork() error {
 }
 
 func (s *FileServer) Start() error {
+	fmt.Println("Starting file servver")
 	if err := s.Transport.ListenAndAccept(); err != nil {
 		return err
 	}
